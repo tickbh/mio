@@ -93,6 +93,10 @@ impl TcpStream {
             Ok(())
         }
     }
+
+    pub fn as_fd(&self) -> i32 {
+        self.inner.as_raw_fd() as i32
+    }
 }
 
 impl Read for TcpStream {

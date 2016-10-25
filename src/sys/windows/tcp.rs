@@ -142,6 +142,10 @@ impl TcpStream {
         })
     }
 
+    pub fn as_fd(&self) -> i32 {
+        self.imp.inner().socket.as_raw_socket() as i32
+    }
+
     fn inner(&self) -> MutexGuard<StreamInner> {
         self.imp.inner()
     }
