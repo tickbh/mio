@@ -13,7 +13,7 @@ use {io, sys, Evented, EventSet, PollOpt, Selector, Token, TryAccept};
 
 #[derive(Debug)]
 pub struct TcpStream {
-    sys: sys::TcpStream,
+    pub sys: sys::TcpStream,
 }
 
 pub use std::net::Shutdown;
