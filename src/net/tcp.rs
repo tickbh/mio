@@ -92,6 +92,10 @@ impl TcpStream {
     pub fn take_socket_error(&self) -> io::Result<()> {
         self.sys.take_socket_error()
     }
+
+    pub fn as_fd(&self) -> i32 {
+        self.sys.as_fd()
+    }
 }
 
 fn inaddr_any(other: &SocketAddr) -> SocketAddr {
