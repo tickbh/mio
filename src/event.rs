@@ -8,7 +8,7 @@ pub struct PollOpt(usize);
 impl PollOpt {
     #[inline]
     pub fn edge() -> PollOpt {
-        PollOpt(0x020)
+        PollOpt(0x01)
     }
 
     #[inline]
@@ -18,17 +18,17 @@ impl PollOpt {
 
     #[inline]
     pub fn level() -> PollOpt {
-        PollOpt(0x040)
+        PollOpt(0x02)
     }
 
     #[inline]
     pub fn oneshot() -> PollOpt {
-        PollOpt(0x080)
+        PollOpt(0x04)
     }
 
     #[inline]
     pub fn urgent() -> PollOpt {
-        PollOpt(0x100)
+        PollOpt(0x08)
     }
 
     #[inline]
@@ -154,28 +154,22 @@ impl Ready {
 
     #[inline]
     pub fn readable() -> Ready {
-        Ready(0x001)
+        Ready(0x01)
     }
 
     #[inline]
     pub fn writable() -> Ready {
-        Ready(0x002)
+        Ready(0x02)
     }
 
     #[inline]
     pub fn error() -> Ready {
-        Ready(0x004)
+        Ready(0x04)
     }
 
     #[inline]
     pub fn hup() -> Ready {
-        Ready(0x008)
-    }
-
-    // Private
-    #[inline]
-    fn drop() -> Ready {
-        Ready(0x10)
+        Ready(0x08)
     }
 
     #[inline]
@@ -188,7 +182,12 @@ impl Ready {
 
     #[inline]
     pub fn is_none(&self) -> bool {
-        (*self & !Ready::drop()) == Ready::none()
+        *self == Ready::none()
+    }
+
+    #[inline]
+    pub fn is_some(&self) -> bool {
+        !self.is_none()
     }
 
     #[inline]
@@ -284,8 +283,7 @@ impl fmt::Debug for Ready {
             (Ready::readable(), "Readable"),
             (Ready::writable(), "Writable"),
             (Ready::error(),    "Error"),
-            (Ready::hup(),      "Hup"),
-            (Ready::drop(),     "Drop")];
+            (Ready::hup(),      "Hup")];
 
         try!(write!(fmt, "Ready {{"));
 
@@ -342,26 +340,20 @@ impl Event {
  *
  */
 
-pub fn as_usize(events: Ready) -> usize {
+pub fn ready_as_usize(events: Ready) -> usize {
     events.0
 }
 
-pub fn from_usize(events: usize) -> Ready {
+pub fn opt_as_usize(opt: PollOpt) -> usize {
+    opt.0
+}
+
+pub fn ready_from_usize(events: usize) -> Ready {
     Ready(events)
 }
 
-/// Returns true if the `Ready` does not have any public OR private flags
-/// set.
-pub fn is_empty(events: Ready) -> bool {
-    events.0 == 0
-}
-
-pub fn is_drop(events: Ready) -> bool {
-    events.contains(Ready::drop())
-}
-
-pub fn drop() -> Ready {
-    Ready::drop()
+pub fn opt_from_usize(opt: usize) -> PollOpt {
+    PollOpt(opt)
 }
 
 // Used internally to mutate an `Event` in place
