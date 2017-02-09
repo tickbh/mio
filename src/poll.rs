@@ -1,12 +1,12 @@
 use {sys, Evented, Token};
 use event::{self, Ready, Event, PollOpt};
 use std::{fmt, io, ptr, usize};
-use std::cell::{UnsafeCell, Cell};
-use std::{marker, ops, isize};
-use std::sync::Arc;
+use std::cell::UnsafeCell;
+use std::{ops, isize};
+use std::sync::{Arc, Mutex, Condvar};
 use std::sync::atomic::{self, AtomicUsize, AtomicPtr, AtomicBool};
 use std::sync::atomic::Ordering::{self, Acquire, Release, AcqRel, Relaxed};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // Poll is backed by two readiness queues. The first is a system readiness queue
 // represented by `sys::Selector`. The system readiness queue handles
@@ -90,18 +90,21 @@ use std::time::Duration;
 /// poll.poll(&mut events, None).unwrap();
 /// ```
 pub struct Poll {
-    // This type is `Send`, but not `Sync`, so ensure it's exposed as such.
-    //
-    // `!Sync` is required to ensure that `Poll:poll` can take `&self` but is
-    // not called concurrently from multiple threads. Adding coordination would
-    // be interest.
-    _marker: marker::PhantomData<Cell<()>>,
-
     // Platform specific IO selector
     selector: sys::Selector,
 
     // Custom readiness queue
     readiness_queue: ReadinessQueue,
+
+    // Use an atomic to first check if a full lock will be required. This is a
+    // fast-path check for single threaded cases avoiding the extra syscall
+    lock_state: AtomicUsize,
+
+    // Sequences concurrent calls to `Poll::poll`
+    lock: Mutex<()>,
+
+    // Wakeup the next waiter
+    condvar: Condvar,
 }
 
 /// Handle to a Poll registration. Used for registering custom types for event
@@ -151,7 +154,7 @@ struct ReadinessQueueInner {
 
     // Tail of the readiness queue.
     //
-    // Only accessed by Poll::poll and not Sync
+    // Only accessed by Poll::poll. Coordination will be handled by the poll fn
     tail_readiness: UnsafeCell<*mut ReadinessNode>,
 
     // Fake readiness node used to punctuate the end of the readiness queue.
@@ -269,10 +272,15 @@ const MAX_REFCOUNT: usize = (isize::MAX) as usize;
 impl Poll {
     /// Return a new `Poll` handle using a default configuration.
     pub fn new() -> io::Result<Poll> {
+        is_send::<Poll>();
+        is_sync::<Poll>();
+
         let poll = Poll {
             selector: try!(sys::Selector::new()),
             readiness_queue: try!(ReadinessQueue::new()),
-            _marker: marker::PhantomData,
+            lock_state: AtomicUsize::new(0),
+            lock: Mutex::new(()),
+            condvar: Condvar::new(),
         };
 
         // Register the notification wakeup FD with the IO poller
@@ -328,10 +336,142 @@ impl Poll {
 
     /// Block the current thread and wait until any `Evented` values registered
     /// with the `Poll` instance are ready or the given timeout has elapsed.
-    pub fn poll(&self,
-                events: &mut Events,
-                timeout: Option<Duration>) -> io::Result<usize> {
+    pub fn poll(&self, events: &mut Events, mut timeout: Option<Duration>) -> io::Result<usize> {
+        let zero = Some(Duration::from_millis(0));
 
+
+        // At a high level, the synchronization strategy is to acquire access to
+        // the critical section by transitioning the atomic from unlocked ->
+        // locked. If the attempt fails, the thread will wait on the condition
+        // variable.
+        //
+        // # Some more detail
+        //
+        // The `lock_state` atomic usize combines:
+        //
+        // - locked flag, stored in the least significant bit
+        // - number of waiting threads, stored in the rest of the bits.
+        //
+        // When a thread transitions the locked flag from 0 -> 1, it has
+        // obtained access to the critical section.
+        //
+        // When entering `poll`, a compare-and-swap from 0 -> 1 is attempted.
+        // This is a fast path for the case when there are no concurrent calls
+        // to poll, which is very common.
+        //
+        // On failure, the mutex is locked, and the thread attempts to increment
+        // the number of waiting threads component of `lock_state`. If this is
+        // successfully done while the locked flag is set, then the thread can
+        // wait on the condition variable.
+        //
+        // When a thread exits the critical section, it unsets the locked flag.
+        // If there are any waiters, which is atomically determined while
+        // unsetting the locked flag, then the condvar is notified.
+
+        let mut curr = self.lock_state.compare_and_swap(0, 1, Acquire);
+
+        if 0 != curr {
+            // Enter slower path
+            let mut lock = self.lock.lock().unwrap();
+            let mut inc = false;
+
+            loop {
+                if curr & 1 == 0 {
+                    // The lock is currently free, attempt to grab it
+                    let mut next = curr | 1;
+
+                    if inc {
+                        // The waiter count has previously been incremented, so
+                        // decrement it here
+                        next -= 2;
+                    }
+
+                    let actual = self.lock_state.compare_and_swap(curr, next, Acquire);
+
+                    if actual != curr {
+                        curr = actual;
+                        continue;
+                    }
+
+                    // Lock acquired, break from the loop
+                    break;
+                } else {
+                    if timeout == zero {
+                        assert!(!inc); // TODO: is this true?
+                        return Ok(0);
+                    }
+
+                    // The lock is currently held, so wait for it to become
+                    // free. If the waiter count hasn't been incremented yet, do
+                    // so now
+                    if !inc {
+                        // Prevent overflow
+                        if curr | 1 == usize::MAX {
+                            panic!();
+                        }
+
+                        let next = curr + 2;
+                        let actual = self.lock_state.compare_and_swap(curr, next, Acquire);
+
+                        if actual != curr {
+                            curr = actual;
+                            continue;
+                        }
+
+                        // Track that the waiter count has been incremented for
+                        // this thread and fall through to the condvar waiting
+                        inc = true;
+                    }
+                }
+
+                lock = match timeout {
+                    Some(to) => {
+                        let now = Instant::now();
+
+                        // Wait to be notified
+                        let (l, result) = self.condvar.wait_timeout(lock, to).unwrap();
+
+                        // Wait timed out, stop trying to wait
+                        if result.timed_out() {
+                            debug_assert!(inc);
+                            self.lock_state.fetch_sub(2, Relaxed);
+                            return Ok(0);
+                        }
+
+                        // See how much time was elapsed in the wait
+                        let elapsed = now.elapsed();
+
+                        // If the timeout was elapsed, then stop trying to wait
+                        if elapsed >= to {
+                            debug_assert!(inc);
+                            self.lock_state.fetch_sub(2, Relaxed);
+                            return Ok(0);
+                        }
+
+                        // Update the timeout
+                        timeout = Some(to - elapsed);
+                        l
+                    }
+                    _ => self.condvar.wait(lock).unwrap(),
+                };
+
+                // Try to lock again...
+            }
+        }
+
+        let ret = self.poll2(events, timeout);
+
+        // Release the lock
+        if 1 != self.lock_state.fetch_and(!1, Release) {
+            // There is at least one waiting thread, so notify one
+            self.condvar.notify_one();
+        }
+
+        ret
+    }
+
+    #[inline]
+    fn poll2(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
         let mut sleep = false;
 
         // Compute the timeout value passed to the system selector. If the
