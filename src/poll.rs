@@ -159,7 +159,7 @@ struct ReadinessQueueInner {
 
     // Fake readiness node used to punctuate the end of the readiness queue.
     // Before attempting to read from the queue, this node is inserted in order
-    // to partition the queue between nodes that are "owened" by the dequeue end
+    // to partition the queue between nodes that are "owned" by the dequeue end
     // and nodes that will be pushed on by producers.
     end_marker: Box<ReadinessNode>,
 
@@ -213,7 +213,7 @@ struct ReadinessNode {
     // is discarded.
     update_lock: AtomicBool,
 
-    // Number of outstandin Registration nodes
+    // Number of outstanding Registration nodes
     num_registration: AtomicUsize,
 
     // Tracks the number of `ReadyRef` pointers
@@ -805,7 +805,7 @@ impl RegistrationInner {
         }
 
         // Relaxed ordering is acceptable here as the only memory that needs to
-        // be visible as part of the update are hte `token_*` variables, and
+        // be visible as part of the update are the `token_*` variables, and
         // ordering has already been handled by the `update_lock` access.
         let mut state = self.state.load(Relaxed);
         let mut next;
@@ -857,7 +857,7 @@ impl RegistrationInner {
             next.set_interest(interest);
             next.set_poll_opt(opt);
 
-            // If there is effecitve readiness, the node will need to be queued
+            // If there is effective readiness, the node will need to be queued
             // for processing. This exact behavior is still TBD, so we are
             // conservative for now and always fire.
             //
@@ -990,10 +990,10 @@ impl ReadinessQueue {
 
         'outer:
         while dst.len() < dst.capacity() {
-            // Dequeue the a node. If the queue is in an inconsistent state,
-            // then stop polling. `Poll::poll` will be called again shortly and
-            // enter a syscall, which should be enough to enable the other
-            // thread to finish the queuing process.
+            // Dequeue a node. If the queue is in an inconsistent state, then
+            // stop polling. `Poll::poll` will be called again shortly and enter
+            // a syscall, which should be enough to enable the other thread to
+            // finish the queuing process.
             let ptr = match self.dequeue_node(until) {
                 Dequeue::Empty | Dequeue::Inconsistent => break,
                 Dequeue::Data(ptr) => ptr,
@@ -1129,7 +1129,7 @@ impl ReadinessQueue {
                 next = (*next).next_readiness.load(Acquire);
             }
 
-            // Only ned to check `until` at this point. `until` is either null,
+            // Only need to check `until` at this point. `until` is either null,
             // which will never match tail OR it is a node that was pushed by
             // the current thread. This means that either:
             //
@@ -1163,8 +1163,9 @@ impl ReadinessQueue {
         }
     }
 
-    // Attempts to state to sleeping. This involves changing `head_readiness`
-    // to `sleep_token`. Returns true if `poll` can sleep.
+    /// Prepare the queue for the `Poll::poll` thread to block in the system
+    /// selector. This involves changing `head_readiness` to `sleep_marker`.
+    /// Returns true if successfull and `poll` can block.
     fn prepare_for_sleep(&self) -> bool {
         let end_marker = self.end_marker();
         let sleep_marker = self.sleep_marker();

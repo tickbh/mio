@@ -11,7 +11,6 @@ use std::thread;
 #[bench]
 fn bench_poll(bench: &mut Bencher) {
     const NUM: usize = 10_000;
-    // const NUM: usize = 8;
     const THREADS: usize = 4;
 
     let poll = Poll::new().unwrap();
